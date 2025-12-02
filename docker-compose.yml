@@ -1,0 +1,10 @@
+services:
+  juniper-backup:
+    build: .
+    container_name: juniper-backup
+    env_file:
+      - .env
+    volumes:
+      - ./backups:/backups
+    # Run once and exit. For cron-like behavior, you'd use a cron container or external scheduler.
+    # To keep it simple as requested, this runs the script once.

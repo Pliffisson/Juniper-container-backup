@@ -1,0 +1,3 @@
+# Run backup every hour
+0 17 * * * root . /etc/environment; /usr/local/bin/python /app/src/backup.py >> /var/log/cron.log 2>&1
+# Empty line is required at the end of this file for a valid cron file.
