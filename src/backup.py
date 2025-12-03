@@ -87,6 +87,7 @@ def cleanup_old_backups(hostname):
 
 def backup_router(hostname, repo):
     print(f"Starting backup for {hostname}...")
+    start_time = datetime.datetime.now()
     
     device = {
         "device_type": "juniper_junos",
@@ -119,6 +120,14 @@ def backup_router(hostname, repo):
             with open(filepath, "w") as f:
                 f.write(config_output)
             
+            # Get file size
+            file_size = os.path.getsize(filepath)
+            file_size_kb = file_size / 1024
+            
+            # Calculate duration
+            end_time = datetime.datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            
             print(f"Backup saved to {filepath}")
             
             # Commit to Git
@@ -127,7 +136,15 @@ def backup_router(hostname, repo):
             # Cleanup old backups using device hostname
             cleanup_old_backups(device_hostname)
             
-            return True, None
+            # Return success with details
+            return True, {
+                "hostname": device_hostname,
+                "ip": hostname.strip(),
+                "filename": filename,
+                "size_kb": file_size_kb,
+                "duration": duration,
+                "timestamp": timestamp
+            }
             
     except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
         error_msg = f"Failed to connect to {hostname}: {e}"
@@ -154,26 +171,64 @@ def main():
     repo = init_git_repo()
 
     print(f"Starting backup job for {len(ROUTER_HOSTS)} routers.")
+    job_start_time = datetime.datetime.now()
     
-    success_hosts = []
+    success_details = []
     failed_hosts = []
 
     for host in ROUTER_HOSTS:
         if host:
-            success, error = backup_router(host, repo)
+            success, result = backup_router(host, repo)
             if success:
-                success_hosts.append(host)
+                success_details.append(result)
             else:
-                failed_hosts.append(f"{host}: {error}")
+                failed_hosts.append({"ip": host.strip(), "error": result})
+
+    job_end_time = datetime.datetime.now()
+    total_duration = (job_end_time - job_start_time).total_seconds()
 
     # Send Telegram Notification
-    if failed_hosts:
-        message = f"❌ *Backup Job Failed (Partial or Complete)*\n\n*Failed Routers:*\n" + "\n".join(failed_hosts)
-        if success_hosts:
-            message += f"\n\n*Successful Routers:* {', '.join(success_hosts)}"
-        send_telegram_notification(message)
-    elif success_hosts:
-        message = f"✅ *Backup Job Completed Successfully*\n\nBacked up {len(success_hosts)} routers:\n" + ", ".join(success_hosts)
+    if failed_hosts or success_details:
+        # Build enhanced message
+        message_lines = []
+        
+        if failed_hosts:
+            message_lines.append("🔴 *BACKUP JOB - FALHA PARCIAL*")
+        else:
+            message_lines.append("✅ *BACKUP JOB - SUCESSO*")
+        
+        message_lines.append("━━━━━━━━━━━━━━━━━━━━")
+        
+        # Job summary
+        message_lines.append(f"📊 *Resumo da Execução*")
+        message_lines.append(f"• Total de dispositivos: `{len(ROUTER_HOSTS)}`")
+        message_lines.append(f"• Sucesso: `{len(success_details)}`")
+        message_lines.append(f"• Falhas: `{len(failed_hosts)}`")
+        message_lines.append(f"• Duração total: `{total_duration:.2f}s`")
+        message_lines.append(f"• Horário: `{job_end_time.strftime('%d/%m/%Y %H:%M:%S')}`")
+        message_lines.append("")
+        
+        # Success details
+        if success_details:
+            message_lines.append("✅ *Backups Realizados*")
+            message_lines.append("━━━━━━━━━━━━━━━━━━━━")
+            for detail in success_details:
+                message_lines.append(f"🖥 *{detail['hostname']}*")
+                message_lines.append(f"  • Arquivo: `{detail['filename']}`")
+                message_lines.append(f"  • Tamanho: `{detail['size_kb']:.2f} KB`")
+                message_lines.append(f"  • Tempo: `{detail['duration']:.2f}s`")
+                message_lines.append("")
+        
+        # Failed details
+        if failed_hosts:
+            message_lines.append("❌ *Falhas*")
+            message_lines.append("━━━━━━━━━━━━━━━━━━━━")
+            for failed in failed_hosts:
+                message_lines.append(f"🖥 IP: `{failed['ip']}`")
+                message_lines.append(f"  • Erro: `{failed['error']}`")
+                message_lines.append("")
+        
+        message = "\n".join(message_lines)
         send_telegram_notification(message)
 
     print("Backup job completed.")
