@@ -2,6 +2,8 @@ import os
 import datetime
 import glob
 import requests
+import threading
+import concurrent.futures
 from git import Repo, InvalidGitRepositoryError
 from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
 from dotenv import load_dotenv
@@ -17,6 +19,9 @@ PASSWORD = os.getenv("JUNIPER_PASSWORD")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "/backups")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Lock for Git operations to prevent race conditions
+GIT_LOCK = threading.Lock()
 
 def get_timestamp():
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -130,11 +135,13 @@ def backup_router(hostname, repo):
             
             print(f"Backup saved to {filepath}")
             
-            # Commit to Git
-            commit_to_git(repo, filename, device_hostname)
-            
-            # Cleanup old backups using device hostname
-            cleanup_old_backups(device_hostname)
+            # Critical section: Git operations and cleanup must be sequential
+            with GIT_LOCK:
+                # Commit to Git
+                commit_to_git(repo, filename, device_hostname)
+                
+                # Cleanup old backups using device hostname
+                cleanup_old_backups(device_hostname)
             
             # Return success with details
             return True, {
@@ -176,13 +183,24 @@ def main():
     success_details = []
     failed_hosts = []
 
-    for host in ROUTER_HOSTS:
-        if host:
-            success, result = backup_router(host, repo)
-            if success:
-                success_details.append(result)
-            else:
-                failed_hosts.append({"ip": host.strip(), "error": result})
+    # Use ThreadPoolExecutor for parallel backups
+    # Default to 5 workers or the number of hosts, whichever is smaller
+    max_workers = min(len(ROUTER_HOSTS), 10)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Create a dictionary to map futures to hosts
+        future_to_host = {executor.submit(backup_router, host, repo): host for host in ROUTER_HOSTS if host}
+        
+        for future in concurrent.futures.as_completed(future_to_host):
+            host = future_to_host[future]
+            try:
+                success, result = future.result()
+                if success:
+                    success_details.append(result)
+                else:
+                    failed_hosts.append({"ip": host.strip(), "error": result})
+            except Exception as exc:
+                failed_hosts.append({"ip": host.strip(), "error": f"Thread exception: {exc}"})
 
     job_end_time = datetime.datetime.now()
     total_duration = (job_end_time - job_start_time).total_seconds()

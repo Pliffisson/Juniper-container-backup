@@ -8,5 +8,11 @@ services:
       - .env
     volumes:
       - ./backups:/backups
+    networks:
+      - juniper-network
     # Run once and exit. For cron-like behavior, you'd use a cron container or external scheduler.
     # To keep it simple as requested, this runs the script once.
+
+networks:
+  juniper-network:
+    driver: bridge

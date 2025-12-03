@@ -12,9 +12,10 @@ Este projeto automatiza o backup de configurações de roteadores Juniper de for
 - **🔒 Conexão Segura**: Utiliza SSH para conectar aos dispositivos.
 - **🏷️ Identificação por Hostname**: Usa o hostname do equipamento nos arquivos de backup.
 - **📂 Organização Automática**: Salva backups com timestamp (`hostname_YYYYMMDD_HHMMSS.conf`).
+- **⚡ Execução Paralela**: Realiza backups de múltiplos roteadores simultaneamente, reduzindo drasticamente o tempo total.
 - **🧹 Limpeza Automática**: Mantém apenas os últimos `N` backups (configurável), economizando espaço.
-- **� Versionamento Git**: Histórico completo de mudanças com commits automáticos.
-- **�🐳 Containerizado**: Roda isolado em um container Docker, fácil de implantar.
+- ** Versionamento Git**: Histórico completo de mudanças com commits automáticos.
+- **🐳 Containerizado**: Roda isolado em um container Docker, fácil de implantar.
 - **⏰ Agendamento**: Executa automaticamente (configurável via Cron).
 - **🌎 Fuso Horário**: Suporte a configuração de Timezone local.
 - **📱 Notificações Telegram**: Relatórios detalhados com métricas técnicas.
@@ -64,7 +65,14 @@ docker compose up --build -d
 
 O container irá iniciar e agendar o backup conforme definido no arquivo `crontab`.
 
-### 4. Verificando Logs
+### 4. Testando Manualmente
+Para forçar uma execução imediata do backup (sem esperar o cron):
+
+```bash
+docker exec juniper-backup python3 src/backup.py
+```
+
+### 5. Verificando Logs
 Para ver se o backup está rodando ou identificar erros:
 
 ```bash
@@ -76,7 +84,7 @@ Os arquivos são salvos na pasta `backups/` dentro do diretório do projeto.
 
 **Exemplo de arquivos gerados:**
 ```
-BORDA_MNS02_20251203_114514.conf
+BORDA_SP02_20251203_114514.conf
 CORE_SP01_20251203_120000.conf
 ```
 
