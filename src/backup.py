@@ -50,17 +50,40 @@ def init_git_repo():
         repo = Repo.init(BACKUP_DIR)
     return repo
 
+MAX_BACKUPS = int(os.getenv("MAX_BACKUPS", "10"))
+
 def commit_to_git(repo, filename, hostname):
     """Commits the change to git."""
     try:
         repo.index.add([filename])
-        if repo.is_dirty(untracked_files=True):
-            repo.index.commit(f"Backup {hostname} - {get_timestamp()}")
-            print(f"Committed changes for {hostname} to Git.")
-        else:
-            print(f"No changes detected for {hostname}.")
+        # Always commit since filename is unique
+        repo.index.commit(f"Backup {hostname} - {filename}")
+        print(f"Committed {filename} to Git.")
     except Exception as e:
         print(f"Git commit failed: {e}")
+
+def cleanup_old_backups(hostname):
+    """Keeps only the last N backups for a given hostname."""
+    try:
+        # Find all backups for this hostname
+        pattern = os.path.join(BACKUP_DIR, f"{hostname}_*.conf")
+        files = glob.glob(pattern)
+        
+        # Sort by modification time (newest last)
+        files.sort(key=os.path.getmtime)
+        
+        if len(files) > MAX_BACKUPS:
+            files_to_delete = files[:-MAX_BACKUPS]
+            for f in files_to_delete:
+                os.remove(f)
+                print(f"Deleted old backup: {f}")
+                
+                # Optional: Remove from git index if you want to keep git clean, 
+                # but usually we keep history in git and only clean disk.
+                # If we want to remove from git as well:
+                # repo.index.remove([f]) 
+    except Exception as e:
+        print(f"Cleanup failed for {hostname}: {e}")
 
 def backup_router(hostname, repo):
     print(f"Starting backup for {hostname}...")
@@ -76,10 +99,21 @@ def backup_router(hostname, repo):
     try:
         with ConnectHandler(**device) as net_connect:
             print(f"Connected to {hostname}")
+            
+            # Get device hostname
+            device_hostname_output = net_connect.send_command("show configuration system host-name")
+            # Extract hostname from output (format: "set system host-name HOSTNAME")
+            device_hostname = device_hostname_output.split()[-1] if device_hostname_output else hostname.strip()
+            
+            # Sanitize hostname: remove special characters that could cause issues in filenames
+            device_hostname = device_hostname.replace(";", "").replace("/", "_").replace("\\", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace('"', "_").replace("<", "_").replace(">", "_").replace("|", "_")
+            
+            # Get configuration
             config_output = net_connect.send_command("show configuration | display set")
             
-            # Save to a fixed filename for Git tracking
-            filename = f"{hostname.strip()}.conf"
+            # Save to a timestamped filename using device hostname
+            timestamp = get_timestamp()
+            filename = f"{device_hostname}_{timestamp}.conf"
             filepath = os.path.join(BACKUP_DIR, filename)
             
             with open(filepath, "w") as f:
@@ -88,7 +122,11 @@ def backup_router(hostname, repo):
             print(f"Backup saved to {filepath}")
             
             # Commit to Git
-            commit_to_git(repo, filename, hostname.strip())
+            commit_to_git(repo, filename, device_hostname)
+            
+            # Cleanup old backups using device hostname
+            cleanup_old_backups(device_hostname)
+            
             return True, None
             
     except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
