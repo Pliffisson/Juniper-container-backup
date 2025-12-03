@@ -11,7 +11,7 @@ load_dotenv()
 
 # Configuration
 ROUTER_HOSTS = os.getenv("ROUTER_HOSTS", "").split(",")
-PORT = os.getenv("PORT", "60002")
+PORT = os.getenv("PORT", "22")
 USERNAME = os.getenv("JUNIPER_USERNAME")
 PASSWORD = os.getenv("JUNIPER_PASSWORD")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "/backups")
