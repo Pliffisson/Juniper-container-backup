@@ -13,7 +13,8 @@ Este projeto automatiza o backup de configurações de roteadores Juniper de for
 - **📂 Organização Automática**: Salva backups com timestamp (`hostname_YYYYMMDD_HHMMSS.conf`).
 - **🧹 Limpeza Automática**: Mantém apenas os últimos `N` backups (configurável), economizando espaço.
 - **🐳 Containerizado**: Roda isolado em um container Docker, fácil de implantar.
-- **⏰ Agendamento**: Executa automaticamente de hora em hora (configurável via Cron).
+- **⏰ Agendamento**: Executa automaticamente (configurável via Cron).
+- **🌎 Fuso Horário**: Suporte a configuração de Timezone local.
 
 ## 🚀 Como Usar
 
@@ -42,6 +43,9 @@ JUNIPER_PASSWORD=sua_senha
 # Configurações de Backup
 BACKUP_DIR=/backups
 MAX_BACKUPS=10
+
+# Fuso Horário (Ex: America/Sao_Paulo, America/Manaus)
+TZ=America/Manaus
 ```
 
 ### 3. Executando
@@ -51,7 +55,7 @@ Para iniciar o serviço de backup automático (rodando em segundo plano):
 docker compose up --build -d
 ```
 
-O container irá iniciar e agendar o backup para rodar **a cada hora** (minuto 0).
+O container irá iniciar e agendar o backup conforme definido no arquivo `crontab`.
 
 ### 4. Verificando Logs
 Para ver se o backup está rodando ou identificar erros:
@@ -70,9 +74,9 @@ Os arquivos são salvos na pasta `backups/` dentro do diretório do projeto.
 ### Alterar Frequência (Cron)
 Para mudar o agendamento, edite o arquivo `crontab`:
 
-- **Padrão (Hora em hora):** `0 * * * *`
+- **Padrão Atual:** `0 22 * * *` (Todo dia às 22:00)
+- **Hora em hora:** `0 * * * *`
 - **Todo dia às 03:00:** `0 3 * * *`
-- **A cada 15 minutos:** `*/15 * * * *`
 
 Após alterar, reinicie o container:
 ```bash

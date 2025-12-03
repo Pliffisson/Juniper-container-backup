@@ -2,6 +2,8 @@ services:
   juniper-backup:
     build: .
     container_name: juniper-backup
+    environment:
+      - TZ=${TZ:-UTC}
     env_file:
       - .env
     volumes:

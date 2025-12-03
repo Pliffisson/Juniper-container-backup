@@ -5,8 +5,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install cron
-RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
+# Install cron and git
+RUN apt-get update && apt-get install -y cron git tzdata && rm -rf /var/lib/apt/lists/*
+
+# Configure git user for commits
+RUN git config --global user.email "backup@bot.com" && \
+    git config --global user.name "Backup Bot"
 
 COPY src/ src/
 
