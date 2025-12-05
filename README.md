@@ -102,6 +102,10 @@ As notificações incluem informações técnicas detalhadas:
 - ⏱️ Tempo de execução individual
 - 🕐 Horário da execução
 
+### Exemplo de Notificação
+
+![Exemplo de notificação do Telegram](docs/telegram-notification-example.png)
+
 ---
 
 ## ⚙️ Personalização Avançada
