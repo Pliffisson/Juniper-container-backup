@@ -1,37 +1,36 @@
-FROM python:3.9-slim
+FROM python:3.12-slim
+
+# Create a non-root user for security
+RUN useradd -m -r appuser
 
 WORKDIR /app
+
+# Install git and tzdata (cron no longer needed)
+RUN apt-get update && apt-get install -y git tzdata && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install cron and git
-RUN apt-get update && apt-get install -y cron git tzdata && rm -rf /var/lib/apt/lists/*
+# Create directory for backups and set permissions
+RUN mkdir -p /backups /var/log /tmp && \
+    chown -R appuser:appuser /app /backups /var/log /tmp
 
-# Configure git user for commits
-RUN git config --global user.email "backup@bot.com" && \
-    git config --global user.name "Backup Bot"
-
+# Copy source code and healthcheck script
 COPY src/ src/
+COPY healthcheck.py run_backup.py ./
+RUN chown -R appuser:appuser /app/src /app/healthcheck.py /app/run_backup.py && \
+    chmod +x /app/healthcheck.py /app/run_backup.py
 
-# Copy crontab file to the cron.d directory
-COPY crontab /etc/cron.d/backup-cron
+# Switch to non-root user
+USER appuser
 
-# Give execution rights on the cron job
-RUN chmod 0644 /etc/cron.d/backup-cron
-
-# Apply cron job
-RUN crontab /etc/cron.d/backup-cron
-
-# Create the log file to be able to run tail
-RUN touch /var/log/cron.log
-
-# Create directory for backups
-RUN mkdir -p /backups
-
-# Set environment variable for backup directory (can be overridden)
+# Set environment variable for backup directory
 ENV BACKUP_DIR=/backups
 
-# Run the command on container startup
-# We dump env vars to /etc/environment so cron can see them
-CMD printenv > /etc/environment && cron && tail -f /var/log/cron.log
+# Healthcheck: Verify backup process is running and responsive
+# Checks every 5 minutes, timeout after 10s, 3 retries before marking unhealthy
+HEALTHCHECK --interval=5m --timeout=10s --retries=3 \
+    CMD python /app/healthcheck.py || exit 1
+
+# Command to run the application directly
+CMD ["python", "src/backup.py"]

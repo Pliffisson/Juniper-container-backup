@@ -4,24 +4,110 @@ import glob
 import requests
 import threading
 import concurrent.futures
+import yaml
+import logging
+import schedule
+import time
+from logging.handlers import RotatingFileHandler
 from git import Repo, InvalidGitRepositoryError
 from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
 from dotenv import load_dotenv
+from jsonschema import validate, ValidationError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-ROUTER_HOSTS = os.getenv("ROUTER_HOSTS", "").split(",")
 PORT = os.getenv("PORT", "22")
-USERNAME = os.getenv("JUNIPER_USERNAME")
-PASSWORD = os.getenv("JUNIPER_PASSWORD")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "/backups")
+# Log to stdout by default for Docker. If LOG_FILE is set, it will ALSO log to file.
+LOG_FILE = os.getenv("LOG_FILE", "/var/log/backup.log") 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BACKUP_INTERVAL_MINUTES = int(os.getenv("BACKUP_INTERVAL_MINUTES", "60"))
+
+# Determine absolute path to inventory.yaml (one directory up from src/)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INVENTORY_FILE = os.path.join(BASE_DIR, "inventory.yaml")
+
+# Platform/Command Map - REMOVED (Juniper Only)
+# Juniper Command
+JUNIPER_COMMAND = "show configuration | display set"
 
 # Lock for Git operations to prevent race conditions
 GIT_LOCK = threading.Lock()
+
+# Inventory validation schema
+INVENTORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "routers": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["host"],
+                "properties": {
+                    "host": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "IP address or hostname of the device"
+                    },
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "description": "SSH port number"
+                    },
+                    "username": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "SSH username"
+                    },
+                    "password": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "SSH password"
+                    }
+                },
+                "additionalProperties": True  # Allow extra fields for flexibility
+            }
+        }
+    },
+    "required": ["routers"],
+    "additionalProperties": True
+}
+
+# Logging Configuration
+logger = logging.getLogger("BackupJob")
+logger.setLevel(logging.INFO)
+
+# Formatter with enhanced date/time format
+formatter = logging.Formatter(
+    '%(asctime)s | %(levelname)-8s | %(message)s',
+    datefmt='%d/%m/%Y %H:%M:%S'
+)
+
+# Stream Handler (stdout) - Always Active for Docker
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+# File Handler (Optional/Rotating)
+# Only try to file log if explicit path given and writable
+try:
+    log_dir = os.path.dirname(LOG_FILE)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+except Exception as e:
+    # Non-critical failure, we still have stdout
+    logger.warning(f"Could not setup file logging (likely permission issue, strictly using stdout): {e}")
+
 
 def get_timestamp():
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -29,7 +115,7 @@ def get_timestamp():
 def send_telegram_notification(message):
     """Sends a notification to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials not configured. Skipping notification.")
+        logger.warning("Telegram credentials not configured. Skipping notification.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -42,16 +128,16 @@ def send_telegram_notification(message):
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
-        print("Telegram notification sent.")
+        logger.info("Telegram notification sent.")
     except Exception as e:
-        print(f"Failed to send Telegram notification: {e}")
+        logger.error(f"Failed to send Telegram notification: {e}")
 
 def init_git_repo():
     """Initializes a git repository in the backup directory if it doesn't exist."""
     try:
         repo = Repo(BACKUP_DIR)
     except InvalidGitRepositoryError:
-        print("Initializing Git repository...")
+        logger.info("Initializing Git repository...")
         repo = Repo.init(BACKUP_DIR)
     return repo
 
@@ -63,9 +149,9 @@ def commit_to_git(repo, filename, hostname):
         repo.index.add([filename])
         # Always commit since filename is unique
         repo.index.commit(f"Backup {hostname} - {filename}")
-        print(f"Committed {filename} to Git.")
+        logger.info(f"Committed {filename} to Git.")
     except Exception as e:
-        print(f"Git commit failed: {e}")
+        logger.error(f"Git commit failed: {e}", exc_info=True)
 
 def cleanup_old_backups(hostname):
     """Keeps only the last N backups for a given hostname."""
@@ -81,41 +167,120 @@ def cleanup_old_backups(hostname):
             files_to_delete = files[:-MAX_BACKUPS]
             for f in files_to_delete:
                 os.remove(f)
-                print(f"Deleted old backup: {f}")
-                
-                # Optional: Remove from git index if you want to keep git clean, 
-                # but usually we keep history in git and only clean disk.
-                # If we want to remove from git as well:
-                # repo.index.remove([f]) 
+                logger.info(f"Deleted old backup: {f}")
     except Exception as e:
-        print(f"Cleanup failed for {hostname}: {e}")
+        logger.error(f"Cleanup failed for {hostname}: {e}", exc_info=True)
 
-def backup_router(hostname, repo):
-    print(f"Starting backup for {hostname}...")
+def validate_environment():
+    """Validates critical environment variables."""
+    warnings = []
+    
+    # Check for credentials (either in env or will be in inventory)
+    if not os.getenv("JUNIPER_USERNAME"):
+        warnings.append("JUNIPER_USERNAME not set - ensure all devices have credentials in inventory.yaml")
+    
+    if not os.getenv("JUNIPER_PASSWORD"):
+        warnings.append("JUNIPER_PASSWORD not set - ensure all devices have credentials in inventory.yaml")
+    
+    # Check Telegram config (optional but warn if incomplete)
+    has_token = bool(TELEGRAM_BOT_TOKEN)
+    has_chat_id = bool(TELEGRAM_CHAT_ID)
+    
+    if has_token != has_chat_id:
+        warnings.append("Telegram configuration incomplete - both BOT_TOKEN and CHAT_ID required for notifications")
+    
+    # Log warnings
+    for warning in warnings:
+        logger.warning(warning)
+    
+    return len(warnings) == 0
+
+
+def load_inventory():
+    """Loads and validates device inventory from YAML file."""
+    if not os.path.exists(INVENTORY_FILE):
+        logger.error(f"Inventory file {INVENTORY_FILE} not found.")
+        return []
+    
+    try:
+        with open(INVENTORY_FILE, 'r') as f:
+            data = yaml.safe_load(f)
+        
+        # Validate against schema
+        try:
+            validate(instance=data, schema=INVENTORY_SCHEMA)
+            logger.info(f"Inventory validation passed: {len(data.get('routers', []))} devices found")
+        except ValidationError as ve:
+            logger.error(f"Inventory validation failed: {ve.message}")
+            logger.error(f"Failed at path: {' -> '.join(str(p) for p in ve.path)}")
+            logger.error("Please check your inventory.yaml file format")
+            return []
+        
+        return data.get('routers', [])
+        
+    except yaml.YAMLError as e:
+        logger.error(f"YAML parsing error in inventory file: {e}", exc_info=True)
+        return []
+    except Exception as e:
+        logger.error(f"Error loading inventory: {e}", exc_info=True)
+        return []
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=16),
+    retry=retry_if_exception_type((NetmikoTimeoutException, ConnectionError, TimeoutError)),
+    reraise=True,
+    before_sleep=lambda retry_state: logger.warning(
+        f"Retry attempt {retry_state.attempt_number} for {retry_state.args[0].get('host', 'unknown')} "
+        f"after {retry_state.outcome.exception()}"
+    )
+)
+def backup_router(device_info, repo):
+    host = device_info.get('host')
+    # Use 'platform' if provided for compatibility, but default/enforce juniper_junos logic
+    # We ignore the inventory platform and force juniper_junos as requested
+    platform = "juniper_junos"
+    
+    # Default to environment variables if not in inventory
+    username = device_info.get('username', os.getenv("JUNIPER_USERNAME"))
+    password = device_info.get('password', os.getenv("JUNIPER_PASSWORD"))
+    port = device_info.get('port', PORT)
+
+    logger.info(f"Starting backup for {host} (Juniper)...")
     start_time = datetime.datetime.now()
     
+    # Validation
+    if not host or not username or not password:
+         error_msg = f"Missing configuration for host {host}"
+         logger.error(error_msg)
+         return False, error_msg
+
     device = {
         "device_type": "juniper_junos",
-        "host": hostname.strip(),
-        "username": USERNAME,
-        "password": PASSWORD,
-        "port": PORT,
+        "host": host,
+        "username": username,
+        "password": password,
+        "port": port,
+        # Increase timeout for large configs
+        "global_delay_factor": 2, 
     }
 
     try:
         with ConnectHandler(**device) as net_connect:
-            print(f"Connected to {hostname}")
+            logger.info(f"Connected to {host}")
             
             # Get device hostname
-            device_hostname_output = net_connect.send_command("show configuration system host-name")
-            # Extract hostname from output (format: "set system host-name HOSTNAME")
-            device_hostname = device_hostname_output.split()[-1] if device_hostname_output else hostname.strip()
-            
-            # Sanitize hostname: remove special characters that could cause issues in filenames
+            try:
+                 device_hostname_output = net_connect.send_command("show configuration system host-name")
+                 device_hostname = device_hostname_output.split()[-1] if device_hostname_output else host
+            except:
+                device_hostname = host
+
+            # Sanitize hostname
             device_hostname = device_hostname.replace(";", "").replace("/", "_").replace("\\", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace('"', "_").replace("<", "_").replace(">", "_").replace("|", "_")
             
             # Get configuration
-            config_output = net_connect.send_command("show configuration | display set")
+            config_output = net_connect.send_command(JUNIPER_COMMAND)
             
             # Save to a timestamped filename using device hostname
             timestamp = get_timestamp()
@@ -133,7 +298,7 @@ def backup_router(hostname, repo):
             end_time = datetime.datetime.now()
             duration = (end_time - start_time).total_seconds()
             
-            print(f"Backup saved to {filepath}")
+            logger.info(f"Backup saved to {filepath}")
             
             # Critical section: Git operations and cleanup must be sequential
             with GIT_LOCK:
@@ -146,7 +311,7 @@ def backup_router(hostname, repo):
             # Return success with details
             return True, {
                 "hostname": device_hostname,
-                "ip": hostname.strip(),
+                "ip": host,
                 "filename": filename,
                 "size_kb": file_size_kb,
                 "duration": duration,
@@ -154,42 +319,63 @@ def backup_router(hostname, repo):
             }
             
     except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
-        error_msg = f"Failed to connect to {hostname}: {e}"
-        print(error_msg)
+        error_msg = f"Failed to connect to {host}: {e}"
+        logger.error(error_msg)
         return False, error_msg
     except Exception as e:
-        error_msg = f"An error occurred with {hostname}: {e}"
-        print(error_msg)
+        error_msg = f"An error occurred with {host}: {e}"
+        logger.error(error_msg, exc_info=True)
         return False, error_msg
 
-def main():
-    if not ROUTER_HOSTS or ROUTER_HOSTS == ['']:
-        print("No routers configured in ROUTER_HOSTS.")
-        return
+def update_healthcheck_timestamp():
+    """Updates timestamp file for healthcheck monitoring."""
+    try:
+        with open('/tmp/last_run', 'w') as f:
+            f.write(str(time.time()))
+    except Exception as e:
+        logger.warning(f"Could not update healthcheck timestamp: {e}")
 
-    if not USERNAME or not PASSWORD:
-        print("Credentials not found in environment variables.")
-        return
 
-    # Ensure backup directory exists
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+def run_backup_job():
+    logger.info("="*80)
+    logger.info("🔧 INICIANDO BACKUP JOB")
+    logger.info("="*80)
     
-    # Initialize Git
-    repo = init_git_repo()
+    # Update healthcheck timestamp at start
+    update_healthcheck_timestamp()
+    
+    # Ensure backup directory exists
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+    except Exception as e:
+        logger.error(f"Failed to create backup dir {BACKUP_DIR}: {e}")
+        # Continue might fail if dir doesn't exist, but maybe it does
+    
+    # Initialize Git (if fails, we might still proceed with file backup)
+    try:
+        repo = init_git_repo()
+    except Exception as e:
+        logger.error(f"Failed to init git repo: {e}")
+        repo = None
 
-    print(f"Starting backup job for {len(ROUTER_HOSTS)} routers.")
+    routers = load_inventory()
+    
+    if not routers:
+        logger.warning("No routers found in inventory.yaml.")
+        return
+
+    logger.info(f"Starting backup for {len(routers)} devices.")
     job_start_time = datetime.datetime.now()
     
     success_details = []
     failed_hosts = []
 
     # Use ThreadPoolExecutor for parallel backups
-    # Default to 5 workers or the number of hosts, whichever is smaller
-    max_workers = min(len(ROUTER_HOSTS), 10)
+    max_workers = min(len(routers), 10)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a dictionary to map futures to hosts
-        future_to_host = {executor.submit(backup_router, host, repo): host for host in ROUTER_HOSTS if host}
+        # Submit tasks
+        future_to_host = {executor.submit(backup_router, router, repo): router.get('host') for router in routers}
         
         for future in concurrent.futures.as_completed(future_to_host):
             host = future_to_host[future]
@@ -198,58 +384,98 @@ def main():
                 if success:
                     success_details.append(result)
                 else:
-                    failed_hosts.append({"ip": host.strip(), "error": result})
+                    failed_hosts.append({"ip": host, "error": result})
             except Exception as exc:
-                failed_hosts.append({"ip": host.strip(), "error": f"Thread exception: {exc}"})
+                failed_hosts.append({"ip": host, "error": f"Thread exception: {exc}"})
 
     job_end_time = datetime.datetime.now()
     total_duration = (job_end_time - job_start_time).total_seconds()
 
     # Send Telegram Notification
     if failed_hosts or success_details:
-        # Build enhanced message
+        total_routers = len(routers)
+        success_count = len(success_details)
+        total_size_mb = sum(d['size_kb'] for d in success_details) / 1024
+        
+        # Header
         message_lines = []
-        
-        if failed_hosts:
-            message_lines.append("🔴 *BACKUP JOB - FALHA PARCIAL*")
-        else:
-            message_lines.append("✅ *BACKUP JOB - SUCESSO*")
-        
-        message_lines.append("━━━━━━━━━━━━━━━━━━━━")
-        
-        # Job summary
-        message_lines.append(f"📊 *Resumo da Execução*")
-        message_lines.append(f"• Total de dispositivos: `{len(ROUTER_HOSTS)}`")
-        message_lines.append(f"• Sucesso: `{len(success_details)}`")
-        message_lines.append(f"• Falhas: `{len(failed_hosts)}`")
-        message_lines.append(f"• Duração total: `{total_duration:.2f}s`")
-        message_lines.append(f"• Horário: `{job_end_time.strftime('%d/%m/%Y %H:%M:%S')}`")
+        message_lines.append("🔧 *JUNIPER BACKUP SYSTEM*")
+        message_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
         message_lines.append("")
         
-        # Success details
-        if success_details:
-            message_lines.append("✅ *Backups Realizados*")
-            message_lines.append("━━━━━━━━━━━━━━━━━━━━")
-            for detail in success_details:
-                message_lines.append(f"🖥 *{detail['hostname']}*")
-                message_lines.append(f"  • Arquivo: `{detail['filename']}`")
-                message_lines.append(f"  • Tamanho: `{detail['size_kb']:.2f} KB`")
-                message_lines.append(f"  • Tempo: `{detail['duration']:.2f}s`")
-                message_lines.append("")
+        # Metrics
+        message_lines.append(f"📅 *Data/Hora:* `{job_end_time.strftime('%d/%m/%Y %H:%M:%S')}`")
+        message_lines.append(f"⏱️ *Duração:* `{int(total_duration)}s`")
+        message_lines.append("")
         
-        # Failed details
+        # Success Icon/Count
         if failed_hosts:
-            message_lines.append("❌ *Falhas*")
-            message_lines.append("━━━━━━━━━━━━━━━━━━━━")
-            for failed in failed_hosts:
-                message_lines.append(f"🖥 IP: `{failed['ip']}`")
-                message_lines.append(f"  • Erro: `{failed['error']}`")
-                message_lines.append("")
+            message_lines.append(f"⚠️ *Status:* `{success_count}/{total_routers} Sucessos`")
+        else:
+            message_lines.append(f"✅ *Status:* `{success_count}/{total_routers} Sucessos`")
+        message_lines.append("")
+
+        # Device List (Success)
+        if success_details:
+            message_lines.append("*✅ Dispositivos com Sucesso:*")
+            for detail in success_details:
+                size_str = f"{detail['size_kb']/1024:.2f}MB"
+                message_lines.append(f"  • `{detail['hostname']}` ({size_str})")
+            message_lines.append("")
         
+        # Device List (Failure)
+        if failed_hosts:
+            message_lines.append("*❌ Falhas:*")
+            for failed in failed_hosts:
+                error_msg = str(failed['error'])[:50]
+                message_lines.append(f"  • `{failed['ip']}`")
+                message_lines.append(f"     ↳ _{error_msg}_")
+            message_lines.append("")
+            
+        # Footer
+        message_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        if not failed_hosts:
+            message_lines.append(f"🎉 *Backup Concluído!*")
+            message_lines.append(f"📊 Total: `{len(success_details)} arquivos` • `{total_size_mb:.2f}MB`")
+        else:
+            message_lines.append(f"⚠️ *Backup finalizado com erros*")
+
         message = "\n".join(message_lines)
         send_telegram_notification(message)
 
-    print("Backup job completed.")
+    # Update healthcheck timestamp at end
+    update_healthcheck_timestamp()
+    
+    logger.info("✅ BACKUP JOB CONCLUÍDO")
+    logger.info("="*80)
+    logger.info("")  # Linha em branco para separar jobs
+
+def main():
+    logger.info("Starting Backup Application (Non-Root)...")
+    logger.info(f"Python version: {os.sys.version}")
+    
+    # Validate environment
+    validate_environment()
+    
+    # Disabled: Run backup immediately on startup
+    # This prevents duplicate notifications when container restarts
+    # To run manually: docker exec juniper-backup python src/backup.py
+    # run_backup_job()
+    
+    # Scheduling Logic
+    backup_time = os.getenv("BACKUP_TIME")
+    
+    if backup_time:
+        logger.info(f"Schedule: Daily at {backup_time}.")
+        schedule.every().day.at(backup_time).do(run_backup_job)
+    else:
+        logger.info(f"Schedule: Every {BACKUP_INTERVAL_MINUTES} minutes.")
+        schedule.every(BACKUP_INTERVAL_MINUTES).minutes.do(run_backup_job)
+    
+    # Loop
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

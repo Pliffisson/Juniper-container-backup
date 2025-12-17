@@ -2,16 +2,20 @@ services:
   juniper-backup:
     build: .
     container_name: juniper-backup
+    restart: unless-stopped # Auto-restart on failure (recommended for production)
     environment:
       - TZ=${TZ:-UTC}
     env_file:
       - .env
     volumes:
       - ./backups:/backups
+      - ./logs:/var/log
+      - ./inventory.yaml:/app/inventory.yaml
     networks:
       - juniper-network
-    # Run once and exit. For cron-like behavior, you'd use a cron container or external scheduler.
-    # To keep it simple as requested, this runs the script once.
+    # Healthcheck is defined in Dockerfile
+    # Check status with: docker inspect --format='{{.State.Health.Status}}' juniper-backup
+    # Container runs continuously with internal scheduling (see BACKUP_TIME or BACKUP_INTERVAL_MINUTES)
 
 networks:
   juniper-network:

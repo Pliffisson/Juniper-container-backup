@@ -1,16 +1,118 @@
-# Environment Variables
+# ============================================
+# SENSITIVE DATA - NEVER COMMIT
+# ============================================
+
+# Environment Variables (contains credentials)
 .env
+.env.*
+!.env.example
 
-# Backup Data
+# Device Inventory (contains IPs, usernames, passwords)
+inventory.yaml
+inventory.yml
+*inventory*.yaml
+*inventory*.yml
+!inventory.example.yaml
+!inventory.example.yml
+
+# Backup Data (may contain sensitive device configs)
 backups/
+backup/
+*.backup
+*.bak
 
-# Python
+# Credentials Files
+credentials.yaml
+credentials.yml
+credentials.json
+secrets.yaml
+secrets.yml
+secrets.json
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+id_rsa*
+!id_rsa*.pub
+
+# ============================================
+# LOGS (may contain IPs and error details)
+# ============================================
+*.log
+logs/
+*.log.*
+log/
+
+# ============================================
+# PYTHON
+# ============================================
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 venv/
 .venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# OS Files
+# ============================================
+# DOCKER
+# ============================================
+# Docker volumes may contain sensitive data
+docker-compose.override.yml
+.dockerignore
+
+# ============================================
+# IDE / EDITOR
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ============================================
+# OS FILES
+# ============================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
+
+# ============================================
+# TEMPORARY / TEST FILES
+# ============================================
+tmp/
+temp/
+*.tmp
+test_inventory*.yaml
+test_inventory*.yml
+*_test.yaml
+*_test.yml

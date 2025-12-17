@@ -1,0 +1,44 @@
+# ============================================
+# INVENTORY EXAMPLE - Juniper Devices
+# ============================================
+# Copy this file to inventory.yaml and configure your devices
+# DO NOT commit inventory.yaml to Git (it's in .gitignore)
+
+routers:
+  # Example 1: Full configuration
+  - host: 192.168.1.1
+    username: admin
+    password: your_secure_password
+    port: 22
+
+  # Example 2: Using environment variables for credentials
+  # If username/password are not specified here, they will be
+  # taken from JUNIPER_USERNAME and JUNIPER_PASSWORD in .env
+  - host: 192.168.1.2
+    port: 22
+
+  # Example 3: Custom SSH port
+  - host: 10.0.0.1
+    username: backup_user
+    password: another_password
+    port: 2222
+
+  # Example 4: Hostname instead of IP
+  - host: router.example.com
+    username: admin
+    password: secure_pass
+    port: 22
+
+# ============================================
+# NOTES
+# ============================================
+# - 'host' is REQUIRED (IP address or hostname)
+# - 'username' is optional (defaults to JUNIPER_USERNAME from .env)
+# - 'password' is optional (defaults to JUNIPER_PASSWORD from .env)
+# - 'port' is optional (defaults to PORT from .env, or 22)
+#
+# SECURITY WARNING:
+# - Passwords are stored in plain text in this file
+# - Ensure this file has restricted permissions: chmod 600 inventory.yaml
+# - For production, consider using Docker Secrets or HashiCorp Vault
+# - This file is automatically ignored by Git (.gitignore)
